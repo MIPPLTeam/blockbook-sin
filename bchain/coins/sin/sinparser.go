@@ -36,11 +36,15 @@ func init() {
 // SinovateParser handle
 type SinovateParser struct {
 	*btc.BitcoinParser
+	baseparser *bchain.BaseParser
 }
 
 // NewSinovateParser returns new SinovateParser instance
 func NewSinovateParser(params *chaincfg.Params, c *btc.Configuration) *SinovateParser {
-	return &SinovateParser{BitcoinParser: btc.NewBitcoinParser(params, c)}
+	return &SinovateParser{
+		BitcoinParser: btc.NewBitcoinParser(params, c),
+		baseparser:    &bchain.BaseParser{},
+		}
 }
 
 // GetChainParams contains network parameters for the main Sinovate network,
@@ -61,4 +65,14 @@ func GetChainParams(chain string) *chaincfg.Params {
 	default:
 		return &MainNetParams
 	}
+}
+
+// PackTx packs transaction to byte array using protobuf
+func (p *SinovateParser) PackTx(tx *bchain.Tx, height uint32, blockTime int64) ([]byte, error) {
+	return p.baseparser.PackTx(tx, height, blockTime)
+}
+
+// UnpackTx unpacks transaction from protobuf byte array
+func (p *SinovateParser) UnpackTx(buf []byte) (*bchain.Tx, uint32, error) {
+	return p.baseparser.UnpackTx(buf)
 }
