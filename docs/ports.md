@@ -46,9 +46,12 @@
 | BitZeny                | 9095                    | 9195                  | 8095             | 38395                       |
 | Trezarcoin             | 9096                    | 9196                  | 8096             | 38396                       |
 | eCash                  | 9097                    | 9197                  | 8097             | 38397                       |
+| Avalanche              | 9098                    | 9198                  | 8098             | 38398 p2p                   |
+| Avalanche Archive      | 9099                    | 9199                  | 8099             | 38399 p2p                   |
 | Bitcoin Signet         | 19020                   | 19120                 | 18020            | 48320                       |
 | Bitcoin Regtest        | 19021                   | 19121                 | 18021            | 48321                       |
 | Ethereum Goerli        | 19026                   | 19126                 | 18026            | 48326 p2p                   |
+| Ethereum Sepolia       | 19176                   | 19176                 | 18076            | 48376 p2p                   |
 | Bitcoin Testnet        | 19030                   | 19130                 | 18030            | 48330                       |
 | Bitcoin Cash Testnet   | 19031                   | 19131                 | 18031            | 48331                       |
 | Zcash Testnet          | 19032                   | 19132                 | 18032            | 48332                       |
