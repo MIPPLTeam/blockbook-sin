@@ -7,6 +7,7 @@ import (
 	"github.com/trezor/blockbook/bchain/coins/btc"
 
 	"github.com/golang/glog"
+    "github.com/juju/errors"
 )
 
 // SinovateRPC is an interface to JSON-RPC bitcoind service.
