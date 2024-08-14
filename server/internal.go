@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"html/template"
 	"net/http"
+	"path/filepath"
+	"sort"
 
 	"github.com/golang/glog"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -12,10 +15,12 @@ import (
 	"github.com/trezor/blockbook/bchain"
 	"github.com/trezor/blockbook/common"
 	"github.com/trezor/blockbook/db"
+	"github.com/trezor/blockbook/fiat"
 )
 
 // InternalServer is handle to internal http server
 type InternalServer struct {
+	htmlTemplates[InternalTemplateData]
 	https       *http.Server
 	certFiles   string
 	db          *db.RocksDB
@@ -28,8 +33,8 @@ type InternalServer struct {
 }
 
 // NewInternalServer creates new internal http interface to blockbook and returns its handle
-func NewInternalServer(binding, certFiles string, db *db.RocksDB, chain bchain.BlockChain, mempool bchain.Mempool, txCache *db.TxCache, metrics *common.Metrics, is *common.InternalState) (*InternalServer, error) {
-	api, err := api.NewWorker(db, chain, mempool, txCache, metrics, is)
+func NewInternalServer(binding, certFiles string, db *db.RocksDB, chain bchain.BlockChain, mempool bchain.Mempool, txCache *db.TxCache, metrics *common.Metrics, is *common.InternalState, fiatRates *fiat.FiatRates) (*InternalServer, error) {
+	api, err := api.NewWorker(db, chain, mempool, txCache, metrics, is, fiatRates)
 	if err != nil {
 		return nil, err
 	}
@@ -41,6 +46,9 @@ func NewInternalServer(binding, certFiles string, db *db.RocksDB, chain bchain.B
 		Handler: serveMux,
 	}
 	s := &InternalServer{
+		htmlTemplates: htmlTemplates[InternalTemplateData]{
+			debug: true,
+		},
 		https:       https,
 		certFiles:   certFiles,
 		db:          db,
@@ -51,11 +59,20 @@ func NewInternalServer(binding, certFiles string, db *db.RocksDB, chain bchain.B
 		is:          is,
 		api:         api,
 	}
+	s.htmlTemplates.newTemplateData = s.newTemplateData
+	s.htmlTemplates.newTemplateDataWithError = s.newTemplateDataWithError
+	s.htmlTemplates.parseTemplates = s.parseTemplates
+	s.templates = s.parseTemplates()
 
 	serveMux.Handle(path+"favicon.ico", http.FileServer(http.Dir("./static/")))
+	serveMux.Handle(path+"static/", http.StripPrefix("/static/", http.FileServer(http.Dir("./static/"))))
 	serveMux.HandleFunc(path+"metrics", promhttp.Handler().ServeHTTP)
 	serveMux.HandleFunc(path, s.index)
-
+	serveMux.HandleFunc(path+"admin", s.htmlTemplateHandler(s.adminIndex))
+	serveMux.HandleFunc(path+"admin/ws-limit-exceeding-ips", s.htmlTemplateHandler(s.wsLimitExceedingIPs))
+	if s.chainParser.GetChainType() == bchain.ChainEthereumType {
+		serveMux.HandleFunc(path+"admin/internal-data-errors", s.htmlTemplateHandler(s.internalDataErrors))
+	}
 	return s, nil
 }
 
@@ -96,4 +113,105 @@ func (s *InternalServer) index(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Write(buf)
+}
+
+const (
+	adminIndexTpl = iota + errorInternalTpl + 1
+	adminInternalErrorsTpl
+	adminLimitExceedingIPS
+
+	internalTplCount
+)
+
+// WsLimitExceedingIP is used to transfer data to the templates
+type WsLimitExceedingIP struct {
+	IP    string
+	Count int
+}
+
+// InternalTemplateData is used to transfer data to the templates
+type InternalTemplateData struct {
+	CoinName               string
+	CoinShortcut           string
+	CoinLabel              string
+	ChainType              bchain.ChainType
+	Error                  *api.APIError
+	InternalDataErrors     []db.BlockInternalDataError
+	RefetchingInternalData bool
+	WsGetAccountInfoLimit  int
+	WsLimitExceedingIPs    []WsLimitExceedingIP
+}
+
+func (s *InternalServer) newTemplateData(r *http.Request) *InternalTemplateData {
+	t := &InternalTemplateData{
+		CoinName:     s.is.Coin,
+		CoinShortcut: s.is.CoinShortcut,
+		CoinLabel:    s.is.CoinLabel,
+		ChainType:    s.chainParser.GetChainType(),
+	}
+	return t
+}
+
+func (s *InternalServer) newTemplateDataWithError(error *api.APIError, r *http.Request) *InternalTemplateData {
+	td := s.newTemplateData(r)
+	td.Error = error
+	return td
+}
+
+func (s *InternalServer) parseTemplates() []*template.Template {
+	templateFuncMap := template.FuncMap{
+		"formatUint32": formatUint32,
+	}
+	createTemplate := func(filenames ...string) *template.Template {
+		if len(filenames) == 0 {
+			panic("Missing templates")
+		}
+		return template.Must(template.New(filepath.Base(filenames[0])).Funcs(templateFuncMap).ParseFiles(filenames...))
+	}
+	t := make([]*template.Template, internalTplCount)
+	t[errorTpl] = createTemplate("./static/internal_templates/error.html", "./static/internal_templates/base.html")
+	t[errorInternalTpl] = createTemplate("./static/internal_templates/error.html", "./static/internal_templates/base.html")
+	t[adminIndexTpl] = createTemplate("./static/internal_templates/index.html", "./static/internal_templates/base.html")
+	t[adminInternalErrorsTpl] = createTemplate("./static/internal_templates/block_internal_data_errors.html", "./static/internal_templates/base.html")
+	t[adminLimitExceedingIPS] = createTemplate("./static/internal_templates/ws_limit_exceeding_ips.html", "./static/internal_templates/base.html")
+	return t
+}
+
+func (s *InternalServer) adminIndex(w http.ResponseWriter, r *http.Request) (tpl, *InternalTemplateData, error) {
+	data := s.newTemplateData(r)
+	return adminIndexTpl, data, nil
+}
+
+func (s *InternalServer) internalDataErrors(w http.ResponseWriter, r *http.Request) (tpl, *InternalTemplateData, error) {
+	if r.Method == http.MethodPost {
+		err := s.api.RefetchInternalData()
+		if err != nil {
+			return errorTpl, nil, err
+		}
+	}
+	data := s.newTemplateData(r)
+	internalErrors, err := s.db.GetBlockInternalDataErrorsEthereumType()
+	if err != nil {
+		return errorTpl, nil, err
+	}
+	data.InternalDataErrors = internalErrors
+	data.RefetchingInternalData = s.api.IsRefetchingInternalData()
+	return adminInternalErrorsTpl, data, nil
+}
+
+func (s *InternalServer) wsLimitExceedingIPs(w http.ResponseWriter, r *http.Request) (tpl, *InternalTemplateData, error) {
+	if r.Method == http.MethodPost {
+		s.is.ResetWsLimitExceedingIPs()
+	}
+	data := s.newTemplateData(r)
+	ips := make([]WsLimitExceedingIP, 0, len(s.is.WsLimitExceedingIPs))
+	for k, v := range s.is.WsLimitExceedingIPs {
+		ips = append(ips, WsLimitExceedingIP{k, v})
+	}
+	sort.Slice(ips, func(i, j int) bool {
+		return ips[i].Count > ips[j].Count
+	})
+	data.WsLimitExceedingIPs = ips
+	data.WsGetAccountInfoLimit = s.is.WsGetAccountInfoLimit
+	return adminLimitExceedingIPS, data, nil
 }

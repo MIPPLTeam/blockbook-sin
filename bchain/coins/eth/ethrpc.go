@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"math/big"
 	"net/http"
 	"strconv"
@@ -30,12 +30,10 @@ type Network uint32
 const (
 	// MainNet is production network
 	MainNet Network = 1
-	// TestNet is Ropsten test network
-	TestNet Network = 3
-	// TestNetGoerli is Goerli test network
-	TestNetGoerli Network = 5
 	// TestNetSepolia is Sepolia test network
 	TestNetSepolia Network = 11155111
+	// TestNetHolesky is Holesky test network
+	TestNetHolesky Network = 17000
 )
 
 // Configuration represents json config file
@@ -56,23 +54,26 @@ type Configuration struct {
 // EthereumRPC is an interface to JSON-RPC eth service.
 type EthereumRPC struct {
 	*bchain.BaseChain
-	Client               bchain.EVMClient
-	RPC                  bchain.EVMRPCClient
-	MainNetChainID       Network
-	Timeout              time.Duration
-	Parser               *EthereumParser
-	PushHandler          func(bchain.NotificationType)
-	OpenRPC              func(string) (bchain.EVMRPCClient, bchain.EVMClient, error)
-	Mempool              *bchain.MempoolEthereumType
-	mempoolInitialized   bool
-	bestHeaderLock       sync.Mutex
-	bestHeader           bchain.EVMHeader
-	bestHeaderTime       time.Time
-	NewBlock             bchain.EVMNewBlockSubscriber
-	newBlockSubscription bchain.EVMClientSubscription
-	NewTx                bchain.EVMNewTxSubscriber
-	newTxSubscription    bchain.EVMClientSubscription
-	ChainConfig          *Configuration
+	Client                bchain.EVMClient
+	RPC                   bchain.EVMRPCClient
+	MainNetChainID        Network
+	Timeout               time.Duration
+	Parser                *EthereumParser
+	PushHandler           func(bchain.NotificationType)
+	OpenRPC               func(string) (bchain.EVMRPCClient, bchain.EVMClient, error)
+	Mempool               *bchain.MempoolEthereumType
+	mempoolInitialized    bool
+	bestHeaderLock        sync.Mutex
+	bestHeader            bchain.EVMHeader
+	bestHeaderTime        time.Time
+	NewBlock              bchain.EVMNewBlockSubscriber
+	newBlockSubscription  bchain.EVMClientSubscription
+	NewTx                 bchain.EVMNewTxSubscriber
+	newTxSubscription     bchain.EVMClientSubscription
+	ChainConfig           *Configuration
+	supportedStakingPools []string
+	stakingPoolNames      []string
+	stakingPoolContracts  []string
 }
 
 // ProcessInternalTransactions specifies if internal transactions are processed
@@ -106,17 +107,22 @@ func NewEthereumRPC(config json.RawMessage, pushHandler func(bchain.Notification
 	return s, nil
 }
 
+// OpenRPC opens RPC connection to ETH backend
+var OpenRPC = func(url string) (bchain.EVMRPCClient, bchain.EVMClient, error) {
+	opts := []rpc.ClientOption{}
+	opts = append(opts, rpc.WithWebsocketMessageSizeLimit(0))
+	r, err := rpc.DialOptions(context.Background(), url, opts...)
+	if err != nil {
+		return nil, nil, err
+	}
+	rc := &EthereumRPCClient{Client: r}
+	ec := &EthereumClient{Client: ethclient.NewClient(r)}
+	return rc, ec, nil
+}
+
 // Initialize initializes ethereum rpc interface
 func (b *EthereumRPC) Initialize() error {
-	b.OpenRPC = func(url string) (bchain.EVMRPCClient, bchain.EVMClient, error) {
-		r, err := rpc.Dial(url)
-		if err != nil {
-			return nil, nil, err
-		}
-		rc := &EthereumRPCClient{Client: r}
-		ec := &EthereumClient{Client: ethclient.NewClient(r)}
-		return rc, ec, nil
-	}
+	b.OpenRPC = OpenRPC
 
 	rc, ec, err := b.OpenRPC(b.ChainConfig.RPCURL)
 	if err != nil {
@@ -143,18 +149,21 @@ func (b *EthereumRPC) Initialize() error {
 	case MainNet:
 		b.Testnet = false
 		b.Network = "livenet"
-	case TestNet:
-		b.Testnet = true
-		b.Network = "testnet"
-	case TestNetGoerli:
-		b.Testnet = true
-		b.Network = "goerli"
 	case TestNetSepolia:
 		b.Testnet = true
 		b.Network = "sepolia"
+	case TestNetHolesky:
+		b.Testnet = true
+		b.Network = "holesky"
 	default:
 		return errors.Errorf("Unknown network id %v", id)
 	}
+
+	err = b.initStakingPools(b.ChainConfig.CoinShortcut)
+	if err != nil {
+		return err
+	}
+
 	glog.Info("rpc: block chain ", b.Network)
 
 	return nil
@@ -175,11 +184,19 @@ func (b *EthereumRPC) InitializeMempool(addrDescForOutpoint bchain.AddrDescForOu
 		return errors.New("Mempool not created")
 	}
 
+	var err error
+	var txs []string
 	// get initial mempool transactions
-	txs, err := b.GetMempoolTransactions()
-	if err != nil {
-		return err
+	// workaround for an occasional `decoding block` error from getBlockRaw - try 3 times with a delay and then proceed
+	for i := 0; i < 3; i++ {
+		txs, err = b.GetMempoolTransactions()
+		if err == nil {
+			break
+		}
+		glog.Error("GetMempoolTransaction ", err)
+		time.Sleep(time.Second * 5)
 	}
+
 	for _, txid := range txs {
 		b.Mempool.AddTransactionToMempool(txid)
 	}
@@ -238,8 +255,10 @@ func (b *EthereumRPC) subscribeEvents() error {
 			if glog.V(2) {
 				glog.Info("rpc: new tx ", hex)
 			}
-			b.Mempool.AddTransactionToMempool(hex)
-			b.PushHandler(bchain.NotificationNewTx)
+			added := b.Mempool.AddTransactionToMempool(hex)
+			if added {
+				b.PushHandler(bchain.NotificationNewTx)
+			}
 		}
 	}()
 
@@ -358,7 +377,7 @@ func (b *EthereumRPC) getConsensusVersion() string {
 		glog.Error("getConsensusVersion ", err)
 		return ""
 	}
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		glog.Error("getConsensusVersion ", err)
 		return ""
@@ -545,7 +564,7 @@ func (b *EthereumRPC) getBlockRaw(hash string, height uint32, fullTxs bool) (jso
 	}
 	if err != nil {
 		return nil, errors.Annotatef(err, "hash %v, height %v", hash, height)
-	} else if len(raw) == 0 {
+	} else if len(raw) == 0 || (len(raw) == 4 && string(raw) == "null") {
 		return nil, bchain.ErrBlockNotFound
 	}
 	return raw, nil
@@ -604,6 +623,9 @@ func (b *EthereumRPC) getCreationContractInfo(contract string, height uint32) *b
 
 func (b *EthereumRPC) processCallTrace(call *rpcCallTrace, d *bchain.EthereumInternalData, contracts []bchain.ContractInfo, blockHeight uint32) []bchain.ContractInfo {
 	value, err := hexutil.DecodeBig(call.Value)
+	if err != nil {
+		value = new(big.Int)
+	}
 	if call.Type == "CREATE" || call.Type == "CREATE2" {
 		d.Transfers = append(d.Transfers, bchain.EthereumInternalTransfer{
 			Type:  bchain.CREATE,
@@ -653,8 +675,28 @@ func (b *EthereumRPC) getInternalDataForBlock(blockHash string, blockHeight uint
 			return data, contracts, err
 		}
 		if len(trace) != len(data) {
-			glog.Error("debug_traceBlockByHash block ", blockHash, ", error: trace length does not match block length ", len(trace), "!=", len(data))
-			return data, contracts, err
+			if len(trace) < len(data) {
+				for i := range transactions {
+					tx := &transactions[i]
+					// bridging transactions in Polygon do not create trace and cause mismatch between the trace size and block size, it is necessary to adjust the trace size
+					// bridging transaction that from and to zero address
+					if tx.To == "0x0000000000000000000000000000000000000000" && tx.From == "0x0000000000000000000000000000000000000000" {
+						if i >= len(trace) {
+							trace = append(trace, rpcTraceResult{})
+						} else {
+							trace = append(trace[:i+1], trace[i:]...)
+							trace[i] = rpcTraceResult{}
+						}
+					}
+				}
+			}
+			if len(trace) != len(data) {
+				e := fmt.Sprint("trace length does not match block length ", len(trace), "!=", len(data))
+				glog.Error("debug_traceBlockByHash block ", blockHash, ", error: ", e)
+				return data, contracts, errors.New(e)
+			} else {
+				glog.Warning("debug_traceBlockByHash block ", blockHash, ", trace adjusted to match the number of transactions in block")
+			}
 		}
 		for i, result := range trace {
 			r := &result.Result
@@ -795,12 +837,13 @@ func (b *EthereumRPC) GetTransactionForMempool(txid string) (*bchain.Tx, error) 
 func (b *EthereumRPC) GetTransaction(txid string) (*bchain.Tx, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), b.Timeout)
 	defer cancel()
-	var tx *bchain.RpcTransaction
+	tx := &bchain.RpcTransaction{}
 	hash := ethcommon.HexToHash(txid)
-	err := b.RPC.CallContext(ctx, &tx, "eth_getTransactionByHash", hash)
+	err := b.RPC.CallContext(ctx, tx, "eth_getTransactionByHash", hash)
 	if err != nil {
 		return nil, err
-	} else if tx == nil {
+	}
+	if *tx == (bchain.RpcTransaction{}) {
 		if b.mempoolInitialized {
 			b.Mempool.RemoveTransactionFromMempool(txid)
 		}

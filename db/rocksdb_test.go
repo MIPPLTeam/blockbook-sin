@@ -5,7 +5,6 @@ package db
 import (
 	"encoding/binary"
 	"encoding/hex"
-	"io/ioutil"
 	"math/big"
 	"os"
 	"reflect"
@@ -15,6 +14,7 @@ import (
 
 	vlq "github.com/bsm/go-vlq"
 	"github.com/juju/errors"
+	"github.com/linxGnu/grocksdb"
 	"github.com/martinboehm/btcutil/chaincfg"
 	"github.com/trezor/blockbook/bchain"
 	"github.com/trezor/blockbook/bchain/coins/btc"
@@ -43,15 +43,15 @@ func bitcoinTestnetParser() *btc.BitcoinParser {
 }
 
 func setupRocksDB(t *testing.T, p bchain.BlockChainParser) *RocksDB {
-	tmp, err := ioutil.TempDir("", "testdb")
+	tmp, err := os.MkdirTemp("", "testdb")
 	if err != nil {
 		t.Fatal(err)
 	}
-	d, err := NewRocksDB(tmp, 100000, -1, p, nil)
+	d, err := NewRocksDB(tmp, 100000, -1, p, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	is, err := d.LoadInternalState("coin-unittest")
+	is, err := d.LoadInternalState(&common.Config{CoinName: "coin-unittest"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -802,6 +802,46 @@ func Test_BulkConnect_BitcoinType(t *testing.T) {
 	}
 }
 
+func Test_BlockFilter_GetAndStore(t *testing.T) {
+	d := setupRocksDB(t, &testBitcoinParser{
+		BitcoinParser: bitcoinTestnetParser(),
+	})
+	defer closeAndDestroyRocksDB(t, d)
+
+	blockHash := "0000000000000003d0c9722718f8ee86c2cf394f9cd458edb1c854de2a7b1a91"
+	blockFilter := "042c6340895e413d8a811fa0"
+	blockFilterBytes, _ := hex.DecodeString(blockFilter)
+
+	// Empty at the beginning
+	got, err := d.GetBlockFilter(blockHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := ""
+	if got != want {
+		t.Fatalf("GetBlockFilter(%s) = %s, want %s", blockHash, got, want)
+	}
+
+	// Store the filter
+	wb := grocksdb.NewWriteBatch()
+	if err := d.storeBlockFilter(wb, blockHash, blockFilterBytes); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.WriteBatch(wb); err != nil {
+		t.Fatal(err)
+	}
+
+	// Get the filter
+	got, err = d.GetBlockFilter(blockHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = blockFilter
+	if got != want {
+		t.Fatalf("GetBlockFilter(%s) = %s, want %s", blockHash, got, want)
+	}
+}
+
 func Test_packBigint_unpackBigint(t *testing.T) {
 	bigbig1, _ := big.NewInt(0).SetString("123456789123456789012345", 10)
 	bigbig2, _ := big.NewInt(0).SetString("12345678912345678901234512389012345123456789123456789012345123456789123456789012345", 10)
@@ -903,9 +943,10 @@ func addressToAddrDesc(addr string, parser bchain.BlockChainParser) []byte {
 func Test_packTxAddresses_unpackTxAddresses(t *testing.T) {
 	parser := bitcoinTestnetParser()
 	tests := []struct {
-		name string
-		hex  string
-		data *TxAddresses
+		name    string
+		hex     string
+		data    *TxAddresses
+		rocksDB *RocksDB
 	}{
 		{
 			name: "1",
@@ -930,6 +971,7 @@ func Test_packTxAddresses_unpackTxAddresses(t *testing.T) {
 					},
 				},
 			},
+			rocksDB: &RocksDB{chainParser: parser, extendedIndex: false},
 		},
 		{
 			name: "2",
@@ -976,6 +1018,7 @@ func Test_packTxAddresses_unpackTxAddresses(t *testing.T) {
 					},
 				},
 			},
+			rocksDB: &RocksDB{chainParser: parser, extendedIndex: false},
 		},
 		{
 			name: "empty address",
@@ -1000,6 +1043,7 @@ func Test_packTxAddresses_unpackTxAddresses(t *testing.T) {
 					},
 				},
 			},
+			rocksDB: &RocksDB{chainParser: parser, extendedIndex: false},
 		},
 		{
 			name: "empty",
@@ -1008,18 +1052,111 @@ func Test_packTxAddresses_unpackTxAddresses(t *testing.T) {
 				Inputs:  []TxInput{},
 				Outputs: []TxOutput{},
 			},
+			rocksDB: &RocksDB{chainParser: parser, extendedIndex: false},
+		},
+		{
+			name: "extendedIndex 1",
+			hex:  "e0398241032ea9149eb21980dc9d413d8eac27314938b9da920ee53e8705021918f2c0c50c7ce2f5670fd52de738288299bd854a85ef1bb304f62f35ced1bd49a8a810002ea91409f70b896169c37981d2b54b371df0d81a136a2c870501dd7e28c0e96672c7fcc8da131427fcea7e841028614813496a56c11e8a6185c16861c495012ea914e371782582a4addb541362c55565d2cdf56f6498870501a1e35ec0ed308c72f9804dfeefdbb483ef8fd1e638180ad81d6b33f4b58d36d19162fa6d8106052fa9141d9ca71efa36d814424ea6ca1437e67287aebe348705012aadcac000b2c06055e5e90e9c82bd4181fde310104391a7fa4f289b1704e5d90caa38400081ce8685592ea91424fbc77cdc62702ade74dcf989c15e5d3f9240bc870501664894c02fa914afbfb74ee994c7d45f6698738bc4226d065266f7870501a1e35ec0effd9ef509383d536b1c8af5bf434c8efbf521a4f2befd4022bbd68694b4ac75ef17a1f4233276a914d2a37ce20ac9ec4f15dd05a7c6e8e9fbdb99850e88ac043b9943603376a9146b2044146a4438e6e5bfbc65f147afeb64d14fbb88ac05012a05f2007c3be24063f268aaa1ed81b64776798f56088757641a34fb156c4f51ed2e9d25a9956d8396f32a",
+			data: &TxAddresses{
+				Height: 12345,
+				VSize:  321,
+				Inputs: []TxInput{
+					{
+						AddrDesc: addressToAddrDesc("2N7iL7AvS4LViugwsdjTB13uN4T7XhV1bCP", parser),
+						ValueSat: *big.NewInt(9011000000),
+						Txid:     "c50c7ce2f5670fd52de738288299bd854a85ef1bb304f62f35ced1bd49a8a810",
+						Vout:     0,
+					},
+					{
+						AddrDesc: addressToAddrDesc("2Mt9v216YiNBAzobeNEzd4FQweHrGyuRHze", parser),
+						ValueSat: *big.NewInt(8011000000),
+						Txid:     "e96672c7fcc8da131427fcea7e841028614813496a56c11e8a6185c16861c495",
+						Vout:     1,
+					},
+					{
+						AddrDesc: addressToAddrDesc("2NDyqJpHvHnqNtL1F9xAeCWMAW8WLJmEMyD", parser),
+						ValueSat: *big.NewInt(7011000000),
+						Txid:     "ed308c72f9804dfeefdbb483ef8fd1e638180ad81d6b33f4b58d36d19162fa6d",
+						Vout:     134,
+					},
+				},
+				Outputs: []TxOutput{
+					{
+						AddrDesc:    addressToAddrDesc("2MuwoFGwABMakU7DCpdGDAKzyj2nTyRagDP", parser),
+						ValueSat:    *big.NewInt(5011000000),
+						Spent:       true,
+						SpentTxid:   dbtestdata.TxidB1T1,
+						SpentIndex:  0,
+						SpentHeight: 432112345,
+					},
+					{
+						AddrDesc: addressToAddrDesc("2Mvcmw7qkGXNWzkfH1EjvxDcNRGL1Kf2tEM", parser),
+						ValueSat: *big.NewInt(6011000000),
+					},
+					{
+						AddrDesc:    addressToAddrDesc("2N9GVuX3XJGHS5MCdgn97gVezc6EgvzikTB", parser),
+						ValueSat:    *big.NewInt(7011000000),
+						Spent:       true,
+						SpentTxid:   dbtestdata.TxidB1T2,
+						SpentIndex:  14231,
+						SpentHeight: 555555,
+					},
+					{
+						AddrDesc: addressToAddrDesc("mzii3fuRSpExMLJEHdHveW8NmiX8MPgavk", parser),
+						ValueSat: *big.NewInt(999900000),
+					},
+					{
+						AddrDesc:    addressToAddrDesc("mqHPFTRk23JZm9W1ANuEFtwTYwxjESSgKs", parser),
+						ValueSat:    *big.NewInt(5000000000),
+						Spent:       true,
+						SpentTxid:   dbtestdata.TxidB2T1,
+						SpentIndex:  674541,
+						SpentHeight: 6666666,
+					},
+				},
+			},
+			rocksDB: &RocksDB{chainParser: parser, extendedIndex: true},
+		},
+		{
+			name: "extendedIndex empty address",
+			hex:  "baef9a152d01010204d2020002162e010162fdd824a780cbb718eeb766eb05d83fdefc793a27082cd5e67f856d69798cf7db03e039",
+			data: &TxAddresses{
+				Height: 123456789,
+				VSize:  45,
+				Inputs: []TxInput{
+					{
+						AddrDesc: []byte(nil),
+						ValueSat: *big.NewInt(1234),
+					},
+				},
+				Outputs: []TxOutput{
+					{
+						AddrDesc: []byte(nil),
+						ValueSat: *big.NewInt(5678),
+					},
+					{
+						AddrDesc:    []byte(nil),
+						ValueSat:    *big.NewInt(98),
+						Spent:       true,
+						SpentTxid:   dbtestdata.TxidB2T4,
+						SpentIndex:  3,
+						SpentHeight: 12345,
+					},
+				},
+			},
+			rocksDB: &RocksDB{chainParser: parser, extendedIndex: true},
 		},
 	}
 	varBuf := make([]byte, maxPackedBigintBytes)
 	buf := make([]byte, 1024)
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			b := packTxAddresses(tt.data, buf, varBuf)
+			b := tt.rocksDB.packTxAddresses(tt.data, buf, varBuf)
 			hex := hex.EncodeToString(b)
 			if !reflect.DeepEqual(hex, tt.hex) {
 				t.Errorf("packTxAddresses() = %v, want %v", hex, tt.hex)
 			}
-			got1, err := unpackTxAddresses(b)
+			got1, err := tt.rocksDB.unpackTxAddresses(b)
 			if err != nil {
 				t.Errorf("unpackTxAddresses() error = %v", err)
 				return
@@ -1495,6 +1632,82 @@ func Test_packUnpackString(t *testing.T) {
 			buf := packString(tt.name)
 			if got, l := unpackString(buf); !reflect.DeepEqual(got, tt.name) || l != len(buf) {
 				t.Errorf("Test_packUnpackString() = %v, want %v, len %d, want len %d", got, tt.name, l, len(buf))
+			}
+		})
+	}
+}
+
+func TestRocksDB_packTxIndexes_unpackTxIndexes(t *testing.T) {
+	type args struct {
+		txi []txIndexes
+	}
+	tests := []struct {
+		name string
+		data []txIndexes
+		hex  string
+	}{
+		{
+			name: "1",
+			data: []txIndexes{
+				{
+					btxID:   hexToBytes(dbtestdata.TxidB1T1),
+					indexes: []int32{1},
+				},
+			},
+			hex: "00b2c06055e5e90e9c82bd4181fde310104391a7fa4f289b1704e5d90caa384006",
+		},
+		{
+			name: "2",
+			data: []txIndexes{
+				{
+					btxID:   hexToBytes(dbtestdata.TxidB1T1),
+					indexes: []int32{-2, 1, 3, 1234, -53241},
+				},
+				{
+					btxID:   hexToBytes(dbtestdata.TxidB1T2),
+					indexes: []int32{-2, -1, 0, 1, 2, 3},
+				},
+			},
+			hex: "effd9ef509383d536b1c8af5bf434c8efbf521a4f2befd4022bbd68694b4ac7507030004080e00b2c06055e5e90e9c82bd4181fde310104391a7fa4f289b1704e5d90caa384007040ca6488cff61",
+		},
+		{
+			name: "3",
+			data: []txIndexes{
+				{
+					btxID:   hexToBytes(dbtestdata.TxidB2T1),
+					indexes: []int32{-2, 1, 3},
+				},
+				{
+					btxID:   hexToBytes(dbtestdata.TxidB1T1),
+					indexes: []int32{-2, -1, 0, 1, 2, 3},
+				},
+				{
+					btxID:   hexToBytes(dbtestdata.TxidB1T2),
+					indexes: []int32{-2},
+				},
+			},
+			hex: "effd9ef509383d536b1c8af5bf434c8efbf521a4f2befd4022bbd68694b4ac750500b2c06055e5e90e9c82bd4181fde310104391a7fa4f289b1704e5d90caa384007030004080e7c3be24063f268aaa1ed81b64776798f56088757641a34fb156c4f51ed2e9d2507040e",
+		},
+	}
+	d := &RocksDB{
+		chainParser: &testBitcoinParser{
+			BitcoinParser: bitcoinTestnetParser(),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b := d.packTxIndexes(tt.data)
+			hex := hex.EncodeToString(b)
+			if !reflect.DeepEqual(hex, tt.hex) {
+				t.Errorf("packTxIndexes() = %v, want %v", hex, tt.hex)
+			}
+			got, err := d.unpackTxIndexes(b)
+			if err != nil {
+				t.Errorf("unpackTxIndexes() error = %v", err)
+				return
+			}
+			if !reflect.DeepEqual(got, tt.data) {
+				t.Errorf("unpackTxIndexes() = %+v, want %+v", got, tt.data)
 			}
 		})
 	}

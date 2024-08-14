@@ -57,6 +57,7 @@ type Vin struct {
 	ScriptSig ScriptSig `json:"scriptSig"`
 	Sequence  uint32    `json:"sequence"`
 	Addresses []string  `json:"addresses"`
+	Witness   [][]byte  `json:"-"`
 }
 
 // ScriptPubKey contains data about output script
@@ -120,9 +121,9 @@ type TokenType int
 
 // TokenType enumeration
 const (
-	FungibleToken    = TokenType(iota) // ERC20
-	NonFungibleToken                   // ERC721
-	MultiToken                         // ERC1155
+	FungibleToken    = TokenType(iota) // ERC20/BEP20
+	NonFungibleToken                   // ERC721/BEP721
+	MultiToken                         // ERC1155/BEP1155
 )
 
 // TokenTypeName specifies type of token
@@ -226,6 +227,13 @@ func (ad AddressDescriptor) String() string {
 	return "ad:" + hex.EncodeToString(ad)
 }
 
+func (ad AddressDescriptor) IsTaproot() bool {
+	if len(ad) == 34 && ad[0] == 0x51 && ad[1] == 0x20 {
+		return true
+	}
+	return false
+}
+
 // AddressDescriptorFromString converts string created by AddressDescriptor.String to AddressDescriptor
 func AddressDescriptorFromString(s string) (AddressDescriptor, error) {
 	if len(s) > 3 && s[0:3] == "ad:" {
@@ -264,6 +272,13 @@ type XpubDescriptor struct {
 
 // MempoolTxidEntries is array of MempoolTxidEntry
 type MempoolTxidEntries []MempoolTxidEntry
+
+// MempoolTxidFilterEntries is a map of txids to mempool golomb filters
+// Also contains a flag whether constant zeroed key was used when calculating the filters
+type MempoolTxidFilterEntries struct {
+	Entries       map[string]string `json:"entries,omitempty"`
+	UsedZeroedKey bool              `json:"usedZeroedKey,omitempty"`
+}
 
 // OnNewBlockFunc is used to send notification about a new block
 type OnNewBlockFunc func(hash string, height uint32)
@@ -318,6 +333,8 @@ type BlockChain interface {
 	EthereumTypeGetNonce(addrDesc AddressDescriptor) (uint64, error)
 	EthereumTypeEstimateGas(params map[string]interface{}) (uint64, error)
 	EthereumTypeGetErc20ContractBalance(addrDesc, contractDesc AddressDescriptor) (*big.Int, error)
+	EthereumTypeGetSupportedStakingPools() []string
+	EthereumTypeGetStakingPoolsData(addrDesc AddressDescriptor) ([]StakingPoolData, error)
 	GetTokenURI(contractDesc AddressDescriptor, tokenID *big.Int) (string, error)
 }
 
@@ -378,4 +395,5 @@ type Mempool interface {
 	GetAddrDescTransactions(addrDesc AddressDescriptor) ([]Outpoint, error)
 	GetAllEntries() MempoolTxidEntries
 	GetTransactionTime(txid string) uint32
+	GetTxidFilterEntries(filterScripts string, fromTimestamp uint32) (MempoolTxidFilterEntries, error)
 }

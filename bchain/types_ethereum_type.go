@@ -6,8 +6,6 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi"
 )
 
-// EthereumType specific
-
 // EthereumInternalTransfer contains data about internal transfer
 type EthereumInternalTransfer struct {
 	Type  EthereumInternalTransactionType `json:"type"`
@@ -16,6 +14,7 @@ type EthereumInternalTransfer struct {
 	Value big.Int                         `json:"value"`
 }
 
+// FourByteSignature contains data about about a contract function signature
 type FourByteSignature struct {
 	// stored in DB
 	Name       string
@@ -26,10 +25,13 @@ type FourByteSignature struct {
 	ParsedParameters []abi.Type
 }
 
+// EthereumParsedInputParam contains data about a contract function parameter
 type EthereumParsedInputParam struct {
 	Type   string   `json:"type"`
 	Values []string `json:"values,omitempty"`
 }
+
+// EthereumParsedInputData contains the parsed data for an input data hex payload
 type EthereumParsedInputData struct {
 	MethodId string                     `json:"methodId"`
 	Name     string                     `json:"name"`
@@ -75,7 +77,7 @@ const (
 
 // EthereumTokenTypeMap maps bchain.TokenType to TokenTypeName
 // the map must match all bchain.TokenType to avoid index out of range panic
-var EthereumTokenTypeMap []TokenTypeName = []TokenTypeName{ERC20TokenType, ERC771TokenType, ERC1155TokenType}
+var EthereumTokenTypeMap = []TokenTypeName{ERC20TokenType, ERC771TokenType, ERC1155TokenType}
 
 type MultiTokenValue struct {
 	Id    big.Int
@@ -120,9 +122,13 @@ type RpcLog struct {
 
 // RpcLog is returned by eth_getTransactionReceipt
 type RpcReceipt struct {
-	GasUsed string    `json:"gasUsed"`
-	Status  string    `json:"status"`
-	Logs    []*RpcLog `json:"logs"`
+	GasUsed     string    `json:"gasUsed"`
+	Status      string    `json:"status"`
+	Logs        []*RpcLog `json:"logs"`
+	L1Fee       string    `json:"l1Fee,omitempty"`
+	L1FeeScalar string    `json:"l1FeeScalar,omitempty"`
+	L1GasPrice  string    `json:"l1GasPrice,omitempty"`
+	L1GasUsed   string    `json:"l1GasUsed,omitempty"`
 }
 
 // EthereumSpecificData contains data specific to Ethereum transactions
@@ -143,4 +149,17 @@ type EthereumBlockSpecificData struct {
 	InternalDataError   string
 	AddressAliasRecords []AddressAliasRecord
 	Contracts           []ContractInfo
+}
+
+// StakingPool holds data about address participation in a staking pool contract
+type StakingPoolData struct {
+	Contract                string  `json:"contract"`
+	Name                    string  `json:"name"`
+	PendingBalance          big.Int `json:"pendingBalance"`          // pendingBalanceOf method
+	PendingDepositedBalance big.Int `json:"pendingDepositedBalance"` // pendingDepositedBalanceOf method
+	DepositedBalance        big.Int `json:"depositedBalance"`        // depositedBalanceOf method
+	WithdrawTotalAmount     big.Int `json:"withdrawTotalAmount"`     // withdrawRequest method, return value [0]
+	ClaimableAmount         big.Int `json:"claimableAmount"`         // withdrawRequest method, return value [1]
+	RestakedReward          big.Int `json:"restakedReward"`          // restakedRewardOf method
+	AutocompoundBalance     big.Int `json:"autocompoundBalance"`     // autocompoundBalanceOf method
 }

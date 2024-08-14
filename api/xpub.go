@@ -541,6 +541,7 @@ func (w *Worker) GetXpubAddress(xpub string, page int, txsOnPage int, option Acc
 	} else {
 		txCount = int(data.txCountEstimate)
 	}
+	addrTxCount := int(data.txCountEstimate)
 	usedTokens := 0
 	var tokens []Token
 	var xpubAddresses map[string]struct{}
@@ -555,7 +556,7 @@ func (w *Worker) GetXpubAddress(xpub string, page int, txsOnPage int, option Acc
 				usedTokens++
 			}
 			if option > AccountDetailsBasic {
-				token := w.tokenFromXpubAddress(data, ad, ci, i, option)
+				token := w.tokenFromXpubAddress(data, ad, int(xd.ChangeIndexes[ci]), i, option)
 				if filter.TokensToReturn == TokensToReturnDerived ||
 					filter.TokensToReturn == TokensToReturnUsed && ad.balance != nil ||
 					filter.TokensToReturn == TokensToReturnNonzeroBalance && ad.balance != nil && !IsZeroBigInt(&ad.balance.BalanceSat) {
@@ -571,7 +572,7 @@ func (w *Worker) GetXpubAddress(xpub string, page int, txsOnPage int, option Acc
 
 	var secondaryValue float64
 	if secondaryCoin != "" {
-		ticker := w.is.GetCurrentTicker("", "")
+		ticker := w.fiatRates.GetCurrentTicker("", "")
 		balance, err := strconv.ParseFloat((*Amount)(&data.balanceSat).DecimalString(w.chainParser.AmountDecimals()), 64)
 		if ticker != nil && err == nil {
 			r, found := ticker.Rates[secondaryCoin]
@@ -589,6 +590,7 @@ func (w *Worker) GetXpubAddress(xpub string, page int, txsOnPage int, option Acc
 		TotalReceivedSat:      (*Amount)(&totalReceived),
 		TotalSentSat:          (*Amount)(&data.sentSat),
 		Txs:                   txCount,
+		AddrTxCount:           addrTxCount,
 		UnconfirmedBalanceSat: (*Amount)(&uBalSat),
 		UnconfirmedTxs:        unconfirmedTxs,
 		Transactions:          txs,

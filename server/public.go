@@ -25,6 +25,7 @@ import (
 	"github.com/trezor/blockbook/bchain"
 	"github.com/trezor/blockbook/common"
 	"github.com/trezor/blockbook/db"
+	"github.com/trezor/blockbook/fiat"
 )
 
 const txsOnPage = 25
@@ -40,42 +41,42 @@ const (
 	apiV2
 )
 
-// PublicServer is a handle to public http server
+// PublicServer provides public http server functionality
 type PublicServer struct {
-	binding          string
-	certFiles        string
-	socketio         *SocketIoServer
-	websocket        *WebsocketServer
-	https            *http.Server
-	db               *db.RocksDB
-	txCache          *db.TxCache
-	chain            bchain.BlockChain
-	chainParser      bchain.BlockChainParser
-	mempool          bchain.Mempool
-	api              *api.Worker
-	explorerURL      string
-	internalExplorer bool
-	metrics          *common.Metrics
-	is               *common.InternalState
-	templates        []*template.Template
-	debug            bool
+	htmlTemplates[TemplateData]
+	binding             string
+	certFiles           string
+	socketio            *SocketIoServer
+	websocket           *WebsocketServer
+	https               *http.Server
+	db                  *db.RocksDB
+	txCache             *db.TxCache
+	chain               bchain.BlockChain
+	chainParser         bchain.BlockChainParser
+	mempool             bchain.Mempool
+	api                 *api.Worker
+	explorerURL         string
+	internalExplorer    bool
+	is                  *common.InternalState
+	fiatRates           *fiat.FiatRates
+	useSatsAmountFormat bool
 }
 
 // NewPublicServer creates new public server http interface to blockbook and returns its handle
 // only basic functionality is mapped, to map all functions, call
-func NewPublicServer(binding string, certFiles string, db *db.RocksDB, chain bchain.BlockChain, mempool bchain.Mempool, txCache *db.TxCache, explorerURL string, metrics *common.Metrics, is *common.InternalState, debugMode bool, enableSubNewTx bool) (*PublicServer, error) {
+func NewPublicServer(binding string, certFiles string, db *db.RocksDB, chain bchain.BlockChain, mempool bchain.Mempool, txCache *db.TxCache, explorerURL string, metrics *common.Metrics, is *common.InternalState, fiatRates *fiat.FiatRates, debugMode bool) (*PublicServer, error) {
 
-	api, err := api.NewWorker(db, chain, mempool, txCache, metrics, is)
+	api, err := api.NewWorker(db, chain, mempool, txCache, metrics, is, fiatRates)
 	if err != nil {
 		return nil, err
 	}
 
-	socketio, err := NewSocketIoServer(db, chain, mempool, txCache, metrics, is)
+	socketio, err := NewSocketIoServer(db, chain, mempool, txCache, metrics, is, fiatRates)
 	if err != nil {
 		return nil, err
 	}
 
-	websocket, err := NewWebsocketServer(db, chain, mempool, txCache, metrics, is, enableSubNewTx)
+	websocket, err := NewWebsocketServer(db, chain, mempool, txCache, metrics, is, fiatRates)
 	if err != nil {
 		return nil, err
 	}
@@ -88,23 +89,31 @@ func NewPublicServer(binding string, certFiles string, db *db.RocksDB, chain bch
 	}
 
 	s := &PublicServer{
-		binding:          binding,
-		certFiles:        certFiles,
-		https:            https,
-		api:              api,
-		socketio:         socketio,
-		websocket:        websocket,
-		db:               db,
-		txCache:          txCache,
-		chain:            chain,
-		chainParser:      chain.GetChainParser(),
-		mempool:          mempool,
-		explorerURL:      explorerURL,
-		internalExplorer: explorerURL == "",
-		metrics:          metrics,
-		is:               is,
-		debug:            debugMode,
+		htmlTemplates: htmlTemplates[TemplateData]{
+			metrics: metrics,
+			debug:   debugMode,
+		},
+		binding:             binding,
+		certFiles:           certFiles,
+		https:               https,
+		api:                 api,
+		socketio:            socketio,
+		websocket:           websocket,
+		db:                  db,
+		txCache:             txCache,
+		chain:               chain,
+		chainParser:         chain.GetChainParser(),
+		mempool:             mempool,
+		explorerURL:         explorerURL,
+		internalExplorer:    explorerURL == "",
+		is:                  is,
+		fiatRates:           fiatRates,
+		useSatsAmountFormat: chain.GetChainParser().GetChainType() == bchain.ChainBitcoinType && chain.GetChainParser().AmountDecimals() == 8,
 	}
+	s.htmlTemplates.newTemplateData = s.newTemplateData
+	s.htmlTemplates.newTemplateDataWithError = s.newTemplateDataWithError
+	s.htmlTemplates.parseTemplates = s.parseTemplates
+	s.htmlTemplates.postHtmlTemplateHandler = s.postHtmlTemplateHandler
 	s.templates = s.parseTemplates()
 
 	// map only basic functions, the rest is enabled by method MapFullPublicInterface
@@ -175,6 +184,7 @@ func (s *PublicServer) ConnectFullPublicInterface() {
 		serveMux.HandleFunc(path+"api/v1/estimatefee/", s.jsonHandler(s.apiEstimateFee, apiV1))
 	}
 	serveMux.HandleFunc(path+"api/block-index/", s.jsonHandler(s.apiBlockIndex, apiDefault))
+	serveMux.HandleFunc(path+"api/block-filters/", s.jsonHandler(s.apiBlockFilters, apiDefault))
 	serveMux.HandleFunc(path+"api/tx-specific/", s.jsonHandler(s.apiTxSpecific, apiDefault))
 	serveMux.HandleFunc(path+"api/tx/", s.jsonHandler(s.apiTx, apiDefault))
 	serveMux.HandleFunc(path+"api/address/", s.jsonHandler(s.apiAddress, apiDefault))
@@ -187,6 +197,7 @@ func (s *PublicServer) ConnectFullPublicInterface() {
 	serveMux.HandleFunc(path+"api/balancehistory/", s.jsonHandler(s.apiBalanceHistory, apiDefault))
 	// v2 format
 	serveMux.HandleFunc(path+"api/v2/block-index/", s.jsonHandler(s.apiBlockIndex, apiV2))
+	serveMux.HandleFunc(path+"api/v2/block-filters/", s.jsonHandler(s.apiBlockFilters, apiV2))
 	serveMux.HandleFunc(path+"api/v2/tx-specific/", s.jsonHandler(s.apiTxSpecific, apiV2))
 	serveMux.HandleFunc(path+"api/v2/tx/", s.jsonHandler(s.apiTx, apiV2))
 	serveMux.HandleFunc(path+"api/v2/address/", s.jsonHandler(s.apiAddress, apiV2))
@@ -343,8 +354,13 @@ func (s *PublicServer) newTemplateData(r *http.Request) *TemplateData {
 		InternalExplorer: s.internalExplorer && !s.is.InitialSync,
 		TOSLink:          api.Text.TOSLink,
 	}
+	if t.ChainType == bchain.ChainEthereumType {
+		t.FungibleTokenName = bchain.EthereumTokenTypeMap[bchain.FungibleToken]
+		t.NonFungibleTokenName = bchain.EthereumTokenTypeMap[bchain.NonFungibleToken]
+		t.MultiTokenName = bchain.EthereumTokenTypeMap[bchain.MultiToken]
+	}
 	if !s.debug {
-		t.Minified = ".min.2"
+		t.Minified = ".min.3"
 	}
 	if s.is.HasFiatRates {
 		// get the secondary coin and if it should be shown either from query parameters "secondary" and "use_secondary"
@@ -368,10 +384,10 @@ func (s *PublicServer) newTemplateData(r *http.Request) *TemplateData {
 				secondary = "usd"
 			}
 		}
-		ticker := s.is.GetCurrentTicker(secondary, "")
+		ticker := s.fiatRates.GetCurrentTicker(secondary, "")
 		if ticker == nil && secondary != "usd" {
 			secondary = "usd"
-			ticker = s.is.GetCurrentTicker(secondary, "")
+			ticker = s.fiatRates.GetCurrentTicker(secondary, "")
 		}
 		if ticker != nil {
 			t.SecondaryCoin = strings.ToUpper(secondary)
@@ -391,82 +407,14 @@ func (s *PublicServer) newTemplateData(r *http.Request) *TemplateData {
 	return t
 }
 
-func (s *PublicServer) newTemplateDataWithError(text string, r *http.Request) *TemplateData {
+func (s *PublicServer) newTemplateDataWithError(error *api.APIError, r *http.Request) *TemplateData {
 	td := s.newTemplateData(r)
-	td.Error = &api.APIError{Text: text}
+	td.Error = error
 	return td
 }
 
-func (s *PublicServer) htmlTemplateHandler(handler func(w http.ResponseWriter, r *http.Request) (tpl, *TemplateData, error)) func(w http.ResponseWriter, r *http.Request) {
-	handlerName := getFunctionName(handler)
-	return func(w http.ResponseWriter, r *http.Request) {
-		var t tpl
-		var data *TemplateData
-		var err error
-		defer func() {
-			if e := recover(); e != nil {
-				glog.Error(handlerName, " recovered from panic: ", e)
-				debug.PrintStack()
-				t = errorInternalTpl
-				if s.debug {
-					data = s.newTemplateDataWithError(fmt.Sprint("Internal server error: recovered from panic ", e), r)
-				} else {
-					data = s.newTemplateDataWithError("Internal server error", r)
-				}
-			}
-			// noTpl means the handler completely handled the request
-			if t != noTpl {
-				w.Header().Set("Content-Type", "text/html; charset=utf-8")
-				// return 500 Internal Server Error with errorInternalTpl
-				if t == errorInternalTpl {
-					w.WriteHeader(http.StatusInternalServerError)
-				}
-				if err := s.templates[t].ExecuteTemplate(w, "base.html", data); err != nil {
-					glog.Error(err)
-				}
-			}
-			s.metrics.ExplorerPendingRequests.With((common.Labels{"method": handlerName})).Dec()
-		}()
-		s.metrics.ExplorerPendingRequests.With((common.Labels{"method": handlerName})).Inc()
-		if s.debug {
-			// reload templates on each request
-			// to reflect changes during development
-			s.templates = s.parseTemplates()
-		}
-		t, data, err = handler(w, r)
-		if err != nil || (data == nil && t != noTpl) {
-			t = errorInternalTpl
-			if apiErr, ok := err.(*api.APIError); ok {
-				data = s.newTemplateData(r)
-				data.Error = apiErr
-				if apiErr.Public {
-					t = errorTpl
-				}
-			} else {
-				if err != nil {
-					glog.Error(handlerName, " error: ", err)
-				}
-				if s.debug {
-					data = s.newTemplateDataWithError(fmt.Sprintf("Internal server error: %v, data %+v", err, data), r)
-				} else {
-					data = s.newTemplateDataWithError("Internal server error", r)
-				}
-			}
-		}
-		// if SecondaryCoin is specified, set secondary_coin cookie
-		if data != nil && data.SecondaryCoin != "" {
-			http.SetCookie(w, &http.Cookie{Name: secondaryCoinCookieName, Value: data.SecondaryCoin + "=" + strconv.FormatBool(data.UseSecondaryCoin), Path: "/"})
-		}
-	}
-}
-
-type tpl int
-
 const (
-	noTpl = tpl(iota)
-	errorTpl
-	errorInternalTpl
-	indexTpl
+	indexTpl = iota + errorInternalTpl + 1
 	txTpl
 	addressTpl
 	xpubTpl
@@ -476,7 +424,7 @@ const (
 	mempoolTpl
 	nftDetailTpl
 
-	tplCount
+	publicTplCount
 )
 
 // TemplateData is used to transfer data to the templates
@@ -486,6 +434,9 @@ type TemplateData struct {
 	CoinLabel                string
 	InternalExplorer         bool
 	ChainType                bchain.ChainType
+	FungibleTokenName        bchain.TokenTypeName
+	NonFungibleTokenName     bchain.TokenTypeName
+	MultiTokenName           bchain.TokenTypeName
 	Address                  *api.Address
 	AddrStr                  string
 	Tx                       *api.Tx
@@ -582,7 +533,7 @@ func (s *PublicServer) parseTemplates() []*template.Template {
 			return t
 		}
 	}
-	t := make([]*template.Template, tplCount)
+	t := make([]*template.Template, publicTplCount)
 	t[errorTpl] = createTemplate("./static/templates/error.html", "./static/templates/base.html")
 	t[errorInternalTpl] = createTemplate("./static/templates/error.html", "./static/templates/base.html")
 	t[indexTpl] = createTemplate("./static/templates/index.html", "./static/templates/base.html")
@@ -603,85 +554,12 @@ func (s *PublicServer) parseTemplates() []*template.Template {
 	return t
 }
 
-func relativeTimeUnit(d int64) string {
-	var u string
-	if d < 60 {
-		if d == 1 {
-			u = " sec"
-		} else {
-			u = " secs"
-		}
-	} else if d < 3600 {
-		d /= 60
-		if d == 1 {
-			u = " min"
-		} else {
-			u = " mins"
-		}
-	} else if d < 3600*24 {
-		d /= 3600
-		if d == 1 {
-			u = " hour"
-		} else {
-			u = " hours"
-		}
-	} else {
-		d /= 3600 * 24
-		if d == 1 {
-			u = " day"
-		} else {
-			u = " days"
-		}
+func (s *PublicServer) postHtmlTemplateHandler(data *TemplateData, w http.ResponseWriter, r *http.Request) {
+	// // if SecondaryCoin is specified, set secondary_coin cookie
+	if data != nil && data.SecondaryCoin != "" {
+		http.SetCookie(w, &http.Cookie{Name: secondaryCoinCookieName, Value: data.SecondaryCoin + "=" + strconv.FormatBool(data.UseSecondaryCoin), Path: "/"})
 	}
-	return strconv.FormatInt(d, 10) + u
-}
 
-func relativeTime(d int64) string {
-	r := relativeTimeUnit(d)
-	if d > 3600*24 {
-		d = d % (3600 * 24)
-		if d >= 3600 {
-			r += " " + relativeTimeUnit(d)
-		}
-	} else if d > 3600 {
-		d = d % 3600
-		if d >= 60 {
-			r += " " + relativeTimeUnit(d)
-		}
-	}
-	return r
-}
-
-func unixTimeSpan(ut int64) template.HTML {
-	t := time.Unix(ut, 0)
-	return timeSpan(&t)
-}
-
-var timeNow = time.Now
-
-func timeSpan(t *time.Time) template.HTML {
-	if t == nil {
-		return ""
-	}
-	u := t.Unix()
-	if u <= 0 {
-		return ""
-	}
-	d := timeNow().Unix() - u
-	f := t.UTC().Format("2006-01-02 15:04:05")
-	if d < 0 {
-		return template.HTML(f)
-	}
-	r := relativeTime(d)
-	return template.HTML(`<span tt="` + f + `">` + r + " ago</span>")
-}
-
-func toJSON(data interface{}) string {
-	json, err := json.Marshal(data)
-	if err != nil {
-		return ""
-	}
-	return string(json)
 }
 
 func (s *PublicServer) formatAmount(a *api.Amount) string {
@@ -691,68 +569,15 @@ func (s *PublicServer) formatAmount(a *api.Amount) string {
 	return s.chainParser.AmountToDecimalString((*big.Int)(a))
 }
 
-func formatAmountWithDecimals(a *api.Amount, d int) string {
-	if a == nil {
-		return "0"
-	}
-	return a.DecimalString(d)
-}
-
-func appendAmountSpan(rv *strings.Builder, class, amount, shortcut, txDate string) {
-	rv.WriteString(`<span`)
-	if class != "" {
-		rv.WriteString(` class="`)
-		rv.WriteString(class)
-		rv.WriteString(`"`)
-	}
-	if txDate != "" {
-		rv.WriteString(` tm="`)
-		rv.WriteString(txDate)
-		rv.WriteString(`"`)
-	}
-	rv.WriteString(">")
-	i := strings.IndexByte(amount, '.')
-	if i < 0 {
-		appendSeparatedNumberSpans(rv, amount, "nc")
-	} else {
-		appendSeparatedNumberSpans(rv, amount[:i], "nc")
-		rv.WriteString(`.`)
-		rv.WriteString(`<span class="amt-dec">`)
-		appendLeftSeparatedNumberSpans(rv, amount[i+1:], "ns")
-		rv.WriteString("</span>")
-	}
-	if shortcut != "" {
-		rv.WriteString(" ")
-		rv.WriteString(shortcut)
-	}
-	rv.WriteString("</span>")
-}
-
-func appendAmountWrapperSpan(rv *strings.Builder, primary, symbol, classes string) {
-	rv.WriteString(`<span class="amt`)
-	if classes != "" {
-		rv.WriteString(` `)
-		rv.WriteString(classes)
-	}
-	rv.WriteString(`" cc="`)
-	rv.WriteString(primary)
-	rv.WriteString(" ")
-	rv.WriteString(symbol)
-	rv.WriteString(`">`)
-}
-
-func formatSecondaryAmount(a float64, td *TemplateData) string {
-	if td.SecondaryCoin == "BTC" || td.SecondaryCoin == "ETH" {
-		return strconv.FormatFloat(a, 'f', 6, 64)
-	}
-	return strconv.FormatFloat(a, 'f', 2, 64)
-}
-
 func (s *PublicServer) amountSpan(a *api.Amount, td *TemplateData, classes string) template.HTML {
 	primary := s.formatAmount(a)
 	var rv strings.Builder
 	appendAmountWrapperSpan(&rv, primary, td.CoinShortcut, classes)
-	appendAmountSpan(&rv, "prim-amt", primary, td.CoinShortcut, "")
+	if s.useSatsAmountFormat {
+		appendAmountSpanBitcoinType(&rv, "prim-amt", primary, td.CoinShortcut, "")
+	} else {
+		appendAmountSpan(&rv, "prim-amt", primary, td.CoinShortcut, "")
+	}
 	if td.SecondaryCoin != "" {
 		p, err := strconv.ParseFloat(primary, 64)
 		if err == nil {
@@ -763,7 +588,11 @@ func (s *PublicServer) amountSpan(a *api.Amount, td *TemplateData, classes strin
 				if td.TxTicker == nil {
 					date := time.Unix(td.Tx.Blocktime, 0).UTC()
 					secondary := strings.ToLower(td.SecondaryCoin)
-					ticker, _ := s.db.FiatRatesFindTicker(&date, secondary, "")
+					var ticker *common.CurrencyRatesTicker
+					tickers, err := s.fiatRates.GetTickersForTimestamps([]int64{int64(td.Tx.Blocktime)}, "", "")
+					if err == nil && tickers != nil && len(*tickers) > 0 {
+						ticker = (*tickers)[0]
+					}
 					if ticker != nil {
 						td.TxSecondaryCoinRate = float64(ticker.Rates[secondary])
 						// the ticker is from the midnight, valid for the whole day before
@@ -890,70 +719,11 @@ func (s *PublicServer) summaryValuesSpan(baseValue float64, secondaryValue float
 	return template.HTML(rv.String())
 }
 
-func formatInt(i int) template.HTML {
-	return formatInt64(int64(i))
-}
-
-func formatUint32(i uint32) template.HTML {
-	return formatInt64(int64(i))
-}
-
-func appendSeparatedNumberSpans(rv *strings.Builder, s, separatorClass string) {
-	if len(s) > 0 && s[0] == '-' {
-		s = s[1:]
-		rv.WriteByte('-')
+func formatSecondaryAmount(a float64, td *TemplateData) string {
+	if td.SecondaryCoin == "BTC" || td.SecondaryCoin == "ETH" {
+		return strconv.FormatFloat(a, 'f', 6, 64)
 	}
-	t := (len(s) - 1) / 3
-	if t <= 0 {
-		rv.WriteString(s)
-	} else {
-		t *= 3
-		rv.WriteString(s[:len(s)-t])
-		for i := len(s) - t; i < len(s); i += 3 {
-			rv.WriteString(`<span class="`)
-			rv.WriteString(separatorClass)
-			rv.WriteString(`">`)
-			rv.WriteString(s[i : i+3])
-			rv.WriteString("</span>")
-		}
-	}
-}
-
-func appendLeftSeparatedNumberSpans(rv *strings.Builder, s, separatorClass string) {
-	l := len(s)
-	if l <= 3 {
-		rv.WriteString(s)
-	} else {
-		rv.WriteString(s[:3])
-		for i := 3; i < len(s); i += 3 {
-			rv.WriteString(`<span class="`)
-			rv.WriteString(separatorClass)
-			rv.WriteString(`">`)
-			e := i + 3
-			if e > l {
-				e = l
-			}
-			rv.WriteString(s[i:e])
-			rv.WriteString("</span>")
-		}
-	}
-}
-
-func formatInt64(i int64) template.HTML {
-	s := strconv.FormatInt(i, 10)
-	var rv strings.Builder
-	appendSeparatedNumberSpans(&rv, s, "ns")
-	return template.HTML(rv.String())
-}
-
-func formatBigInt(i *big.Int) template.HTML {
-	if i == nil {
-		return ""
-	}
-	s := i.String()
-	var rv strings.Builder
-	appendSeparatedNumberSpans(&rv, s, "ns")
-	return template.HTML(rv.String())
+	return strconv.FormatFloat(a, 'f', 2, 64)
 }
 
 func getAddressAlias(a string, td *TemplateData) *api.AddressAlias {
@@ -1456,6 +1226,96 @@ func (s *PublicServer) apiBlockIndex(r *http.Request, apiVersion int) (interface
 	return resBlockIndex{
 		BlockHash: hash,
 	}, nil
+}
+
+func (s *PublicServer) apiBlockFilters(r *http.Request, apiVersion int) (interface{}, error) {
+	// Define return type
+	type blockFilterResult struct {
+		BlockHash string `json:"blockHash"`
+		Filter    string `json:"filter"`
+	}
+	type resBlockFilters struct {
+		ParamP       uint8                     `json:"P"`
+		ParamM       uint64                    `json:"M"`
+		ZeroedKey    bool                      `json:"zeroedKey"`
+		BlockFilters map[int]blockFilterResult `json:"blockFilters"`
+	}
+
+	// Parse parameters
+	lastN, ec := strconv.Atoi(r.URL.Query().Get("lastN"))
+	if ec != nil {
+		lastN = 0
+	}
+	from, ec := strconv.Atoi(r.URL.Query().Get("from"))
+	if ec != nil {
+		from = 0
+	}
+	to, ec := strconv.Atoi(r.URL.Query().Get("to"))
+	if ec != nil {
+		to = 0
+	}
+	scriptType := r.URL.Query().Get("scriptType")
+	if scriptType != s.is.BlockFilterScripts {
+		return nil, api.NewAPIError(fmt.Sprintf("Invalid scriptType %s. Use %s", scriptType, s.is.BlockFilterScripts), true)
+	}
+	// NOTE: technically, we are also accepting "m: uint64" param, but we do not use it currently
+
+	// Sanity checks
+	if lastN == 0 && from == 0 && to == 0 {
+		return nil, api.NewAPIError("Missing parameters", true)
+	}
+	if from > to {
+		return nil, api.NewAPIError("Invalid parameters - from > to", true)
+	}
+
+	// Best height is needed more than once
+	bestHeight, _, err := s.db.GetBestBlock()
+	if err != nil {
+		glog.Error(err)
+		return nil, err
+	}
+
+	// Modify to/from if needed
+	if lastN > 0 {
+		// Get data for last N blocks
+		to = int(bestHeight)
+		from = to - lastN + 1
+	} else {
+		// Get data for specified from-to range
+		// From will always stay the same (even if 0)
+		// To will be the best block if not specified
+		if to == 0 {
+			to = int(bestHeight)
+		}
+	}
+
+	handleBlockFiltersResultFromTo := func(fromHeight int, toHeight int) (interface{}, error) {
+		blockFiltersMap := make(map[int]blockFilterResult)
+		for i := fromHeight; i <= toHeight; i++ {
+			blockHash, err := s.db.GetBlockHash(uint32(i))
+			if err != nil {
+				glog.Error(err)
+				return nil, err
+			}
+			blockFilter, err := s.db.GetBlockFilter(blockHash)
+			if err != nil {
+				glog.Error(err)
+				return nil, err
+			}
+			blockFiltersMap[i] = blockFilterResult{
+				BlockHash: blockHash,
+				Filter:    blockFilter,
+			}
+		}
+		return resBlockFilters{
+			ParamP:       s.is.BlockGolombFilterP,
+			ParamM:       bchain.GetGolombParamM(s.is.BlockGolombFilterP),
+			ZeroedKey:    s.is.BlockFilterUseZeroedKey,
+			BlockFilters: blockFiltersMap,
+		}, nil
+	}
+
+	return handleBlockFiltersResultFromTo(from, to)
 }
 
 func (s *PublicServer) apiTx(r *http.Request, apiVersion int) (interface{}, error) {

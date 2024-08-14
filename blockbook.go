@@ -2,9 +2,7 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
-	"io/ioutil"
 	"log"
 	"math/rand"
 	"net/http"
@@ -12,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -84,6 +83,8 @@ var (
 
 	// resync mempool at least each resyncMempoolPeriodMs (could be more often if invoked by message from ZeroMQ)
 	resyncMempoolPeriodMs = flag.Int("resyncmempoolperiod", 60017, "resync mempool period in milliseconds")
+
+	extendedIndex = flag.Bool("extendedindex", false, "if true, create index of input txids and spending transactions")
 )
 
 var (
@@ -100,6 +101,7 @@ var (
 	metrics                       *common.Metrics
 	syncWorker                    *db.SyncWorker
 	internalState                 *common.InternalState
+	fiatRates                     *fiat.FiatRates
 	callbacksOnNewBlock           []bchain.OnNewBlockFunc
 	callbacksOnNewTxAddr          []bchain.OnNewTxAddrFunc
 	callbacksOnNewTx              []bchain.OnNewTxFunc
@@ -150,36 +152,31 @@ func mainWithExitCode() int {
 		return exitCodeOK
 	}
 
-	if *configFile == "" {
-		glog.Error("Missing blockchaincfg configuration parameter")
-		return exitCodeFatal
-	}
-
-	coin, coinShortcut, coinLabel, err := coins.GetCoinNameFromConfig(*configFile)
+	config, err := common.GetConfig(*configFile)
 	if err != nil {
 		glog.Error("config: ", err)
 		return exitCodeFatal
 	}
 
-	metrics, err = common.GetMetrics(coin)
+	metrics, err = common.GetMetrics(config.CoinName)
 	if err != nil {
 		glog.Error("metrics: ", err)
 		return exitCodeFatal
 	}
 
-	if chain, mempool, err = getBlockChainWithRetry(coin, *configFile, pushSynchronizationHandler, metrics, 120); err != nil {
+	if chain, mempool, err = getBlockChainWithRetry(config.CoinName, *configFile, pushSynchronizationHandler, metrics, 120); err != nil {
 		glog.Error("rpc: ", err)
 		return exitCodeFatal
 	}
 
-	index, err = db.NewRocksDB(*dbPath, *dbCache, *dbMaxOpenFiles, chain.GetChainParser(), metrics)
+	index, err = db.NewRocksDB(*dbPath, *dbCache, *dbMaxOpenFiles, chain.GetChainParser(), metrics, *extendedIndex)
 	if err != nil {
 		glog.Error("rocksDB: ", err)
 		return exitCodeFatal
 	}
 	defer index.Close()
 
-	internalState, err = newInternalState(coin, coinShortcut, coinLabel, index)
+	internalState, err = newInternalState(config, index, *enableSubNewTx)
 	if err != nil {
 		glog.Error("internalState: ", err)
 		return exitCodeFatal
@@ -194,6 +191,17 @@ func mainWithExitCode() int {
 		}
 		internalState.UtxoChecked = true
 	}
+
+	// sort addressContracts if necessary
+	if !internalState.SortedAddressContracts {
+		err = index.SortAddressContracts(chanOsSignal)
+		if err != nil {
+			glog.Error("sortAddressContracts: ", err)
+			return exitCodeFatal
+		}
+		internalState.SortedAddressContracts = true
+	}
+
 	index.SetInternalState(internalState)
 	if *fixUtxo {
 		err = index.StoreInternalState(internalState)
@@ -257,6 +265,11 @@ func mainWithExitCode() int {
 
 	if txCache, err = db.NewTxCache(index, chain, metrics, internalState, !*noTxCache); err != nil {
 		glog.Error("txCache ", err)
+		return exitCodeFatal
+	}
+
+	if fiatRates, err = fiat.NewFiatRates(index, config, metrics, onNewFiatRatesTicker); err != nil {
+		glog.Error("fiatRates ", err)
 		return exitCodeFatal
 	}
 
@@ -344,7 +357,7 @@ func mainWithExitCode() int {
 
 	if internalServer != nil || publicServer != nil || chain != nil {
 		// start fiat rates downloader only if not shutting down immediately
-		initDownloaders(index, chain, *configFile)
+		initDownloaders(index, chain, config)
 		waitForSignalAndShutdown(internalServer, publicServer, chain, 10*time.Second)
 	}
 
@@ -384,7 +397,7 @@ func getBlockChainWithRetry(coin string, configFile string, pushHandler func(bch
 }
 
 func startInternalServer() (*server.InternalServer, error) {
-	internalServer, err := server.NewInternalServer(*internalBinding, *certFiles, index, chain, mempool, txCache, metrics, internalState)
+	internalServer, err := server.NewInternalServer(*internalBinding, *certFiles, index, chain, mempool, txCache, metrics, internalState, fiatRates)
 	if err != nil {
 		return nil, err
 	}
@@ -404,7 +417,7 @@ func startInternalServer() (*server.InternalServer, error) {
 
 func startPublicServer() (*server.PublicServer, error) {
 	// start public server in limited functionality, extend it after sync is finished by calling ConnectFullPublicInterface
-	publicServer, err := server.NewPublicServer(*publicBinding, *certFiles, index, chain, mempool, txCache, *explorerURL, metrics, internalState, *debugMode, *enableSubNewTx)
+	publicServer, err := server.NewPublicServer(*publicBinding, *certFiles, index, chain, mempool, txCache, *explorerURL, metrics, internalState, fiatRates, *debugMode)
 	if err != nil {
 		return nil, err
 	}
@@ -450,7 +463,7 @@ func performRollback() error {
 }
 
 func blockbookAppInfoMetric(db *db.RocksDB, chain bchain.BlockChain, txCache *db.TxCache, is *common.InternalState, metrics *common.Metrics) error {
-	api, err := api.NewWorker(db, chain, mempool, txCache, metrics, is)
+	api, err := api.NewWorker(db, chain, mempool, txCache, metrics, is, fiatRates)
 	if err != nil {
 		return err
 	}
@@ -477,16 +490,13 @@ func blockbookAppInfoMetric(db *db.RocksDB, chain bchain.BlockChain, txCache *db
 	return nil
 }
 
-func newInternalState(coin, coinShortcut, coinLabel string, d *db.RocksDB) (*common.InternalState, error) {
-	is, err := d.LoadInternalState(coin)
+func newInternalState(config *common.Config, d *db.RocksDB, enableSubNewTx bool) (*common.InternalState, error) {
+	is, err := d.LoadInternalState(config)
 	if err != nil {
 		return nil, err
 	}
-	is.CoinShortcut = coinShortcut
-	if coinLabel == "" {
-		coinLabel = coin
-	}
-	is.CoinLabel = coinLabel
+
+	is.EnableSubNewTx = enableSubNewTx
 	name, err := os.Hostname()
 	if err != nil {
 		glog.Error("get hostname ", err)
@@ -495,6 +505,12 @@ func newInternalState(coin, coinShortcut, coinLabel string, d *db.RocksDB) (*com
 			name = name[:i]
 		}
 		is.Host = name
+	}
+
+	is.WsGetAccountInfoLimit, _ = strconv.Atoi(os.Getenv(strings.ToUpper(is.CoinShortcut) + "_WS_GETACCOUNTINFO_LIMIT"))
+	if is.WsGetAccountInfoLimit > 0 {
+		glog.Info("WsGetAccountInfoLimit enabled with limit ", is.WsGetAccountInfoLimit)
+		is.WsLimitExceedingIPs = make(map[string]int)
 	}
 	return is, nil
 }
@@ -668,7 +684,7 @@ func waitForSignalAndShutdown(internal *server.InternalServer, public *server.Pu
 func computeFeeStats(stopCompute chan os.Signal, blockFrom, blockTo int, db *db.RocksDB, chain bchain.BlockChain, txCache *db.TxCache, is *common.InternalState, metrics *common.Metrics) error {
 	start := time.Now()
 	glog.Info("computeFeeStats start")
-	api, err := api.NewWorker(db, chain, mempool, txCache, metrics, is)
+	api, err := api.NewWorker(db, chain, mempool, txCache, metrics, is, fiatRates)
 	if err != nil {
 		return err
 	}
@@ -677,36 +693,9 @@ func computeFeeStats(stopCompute chan os.Signal, blockFrom, blockTo int, db *db.
 	return err
 }
 
-func initDownloaders(db *db.RocksDB, chain bchain.BlockChain, configFile string) {
-	data, err := ioutil.ReadFile(configFile)
-	if err != nil {
-		glog.Errorf("Error reading file %v, %v", configFile, err)
-		return
-	}
-
-	var config struct {
-		FiatRates             string `json:"fiat_rates"`
-		FiatRatesParams       string `json:"fiat_rates_params"`
-		FiatRatesVsCurrencies string `json:"fiat_rates_vs_currencies"`
-		FourByteSignatures    string `json:"fourByteSignatures"`
-	}
-
-	err = json.Unmarshal(data, &config)
-	if err != nil {
-		glog.Errorf("Error parsing config file %v, %v", configFile, err)
-		return
-	}
-
-	if config.FiatRates == "" || config.FiatRatesParams == "" {
-		glog.Infof("FiatRates config (%v) is empty, not downloading fiat rates", configFile)
-	} else {
-		fiatRates, err := fiat.NewFiatRatesDownloader(db, config.FiatRates, config.FiatRatesParams, config.FiatRatesVsCurrencies, onNewFiatRatesTicker)
-		if err != nil {
-			glog.Errorf("NewFiatRatesDownloader Init error: %v", err)
-		} else {
-			glog.Infof("Starting %v FiatRates downloader...", config.FiatRates)
-			go fiatRates.Run()
-		}
+func initDownloaders(db *db.RocksDB, chain bchain.BlockChain, config *common.Config) {
+	if fiatRates.Enabled {
+		go fiatRates.RunDownloader()
 	}
 
 	if config.FourByteSignatures != "" && chain.GetChainParser().GetChainType() == bchain.ChainEthereumType {

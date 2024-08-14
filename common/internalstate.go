@@ -57,8 +57,10 @@ type InternalState struct {
 	CoinShortcut string `json:"coinShortcut"`
 	CoinLabel    string `json:"coinLabel"`
 	Host         string `json:"host"`
+	Network      string `json:"network,omitempty"`
 
-	DbState uint32 `json:"dbState"`
+	DbState       uint32 `json:"dbState"`
+	ExtendedIndex bool   `json:"extendedIndex"`
 
 	LastStore time.Time `json:"lastStore"`
 
@@ -68,6 +70,7 @@ type InternalState struct {
 	InitialSync    bool      `json:"initialSync"`
 	IsSynchronized bool      `json:"isSynchronized"`
 	BestHeight     uint32    `json:"bestHeight"`
+	StartSync      time.Time `json:"-"`
 	LastSync       time.Time `json:"lastSync"`
 	BlockTimes     []uint32  `json:"-"`
 	AvgBlockPeriod uint32    `json:"-"`
@@ -78,21 +81,34 @@ type InternalState struct {
 
 	DbColumns []InternalStateColumn `json:"dbColumns"`
 
-	UtxoChecked bool `json:"utxoChecked"`
+	HasFiatRates                 bool      `json:"-"`
+	HasTokenFiatRates            bool      `json:"-"`
+	HistoricalFiatRatesTime      time.Time `json:"historicalFiatRatesTime"`
+	HistoricalTokenFiatRatesTime time.Time `json:"historicalTokenFiatRatesTime"`
 
-	HasFiatRates                 bool                 `json:"-"`
-	HasTokenFiatRates            bool                 `json:"-"`
-	HistoricalFiatRatesTime      time.Time            `json:"historicalFiatRatesTime"`
-	HistoricalTokenFiatRatesTime time.Time            `json:"historicalTokenFiatRatesTime"`
-	CurrentTicker                *CurrencyRatesTicker `json:"currentTicker"`
+	EnableSubNewTx bool `json:"-"`
 
 	BackendInfo BackendInfo `json:"-"`
+
+	// database migrations
+	UtxoChecked            bool `json:"utxoChecked"`
+	SortedAddressContracts bool `json:"sortedAddressContracts"`
+
+	// golomb filter settings
+	BlockGolombFilterP      uint8  `json:"block_golomb_filter_p"`
+	BlockFilterScripts      string `json:"block_filter_scripts"`
+	BlockFilterUseZeroedKey bool   `json:"block_filter_use_zeroed_key"`
+
+	// allowed number of fetched accounts over websocket
+	WsGetAccountInfoLimit int            `json:"-"`
+	WsLimitExceedingIPs   map[string]int `json:"-"`
 }
 
 // StartedSync signals start of synchronization
 func (is *InternalState) StartedSync() {
 	is.mux.Lock()
 	defer is.mux.Unlock()
+	is.StartSync = time.Now().UTC()
 	is.IsSynchronized = false
 }
 
@@ -102,7 +118,7 @@ func (is *InternalState) FinishedSync(bestHeight uint32) {
 	defer is.mux.Unlock()
 	is.IsSynchronized = true
 	is.BestHeight = bestHeight
-	is.LastSync = time.Now()
+	is.LastSync = time.Now().UTC()
 }
 
 // UpdateBestHeight sets new best height, without changing IsSynchronized flag
@@ -110,7 +126,7 @@ func (is *InternalState) UpdateBestHeight(bestHeight uint32) {
 	is.mux.Lock()
 	defer is.mux.Unlock()
 	is.BestHeight = bestHeight
-	is.LastSync = time.Now()
+	is.LastSync = time.Now().UTC()
 }
 
 // FinishedSyncNoChange marks end of synchronization in case no index update was necessary, it does not update lastSync time
@@ -121,10 +137,10 @@ func (is *InternalState) FinishedSyncNoChange() {
 }
 
 // GetSyncState gets the state of synchronization
-func (is *InternalState) GetSyncState() (bool, uint32, time.Time) {
+func (is *InternalState) GetSyncState() (bool, uint32, time.Time, time.Time) {
 	is.mux.Lock()
 	defer is.mux.Unlock()
-	return is.IsSynchronized, is.BestHeight, is.LastSync
+	return is.IsSynchronized, is.BestHeight, is.LastSync, is.StartSync
 }
 
 // StartedMempoolSync signals start of mempool synchronization
@@ -290,6 +306,15 @@ func (is *InternalState) computeAvgBlockPeriod() {
 	is.AvgBlockPeriod = (is.BlockTimes[last] - is.BlockTimes[first]) / avgBlockPeriodSample
 }
 
+// GetNetwork returns network. If not set returns the same value as CoinShortcut
+func (is *InternalState) GetNetwork() string {
+	network := is.Network
+	if network == "" {
+		return is.CoinShortcut
+	}
+	return network
+}
+
 // SetBackendInfo sets new BackendInfo
 func (is *InternalState) SetBackendInfo(bi *BackendInfo) {
 	is.mux.Lock()
@@ -312,24 +337,6 @@ func (is *InternalState) Pack() ([]byte, error) {
 	return json.Marshal(is)
 }
 
-// GetCurrentTicker returns current ticker
-func (is *InternalState) GetCurrentTicker(vsCurrency string, token string) *CurrencyRatesTicker {
-	is.mux.Lock()
-	currentTicker := is.CurrentTicker
-	is.mux.Unlock()
-	if currentTicker != nil && IsSuitableTicker(currentTicker, vsCurrency, token) {
-		return currentTicker
-	}
-	return nil
-}
-
-// SetCurrentTicker sets current ticker
-func (is *InternalState) SetCurrentTicker(t *CurrencyRatesTicker) {
-	is.mux.Lock()
-	defer is.mux.Unlock()
-	is.CurrentTicker = t
-}
-
 // UnpackInternalState unmarshals internal state from json
 func UnpackInternalState(buf []byte) (*InternalState, error) {
 	var is InternalState
@@ -347,4 +354,16 @@ func SetInShutdown() {
 // IsInShutdown returns true if in application shutdown state
 func IsInShutdown() bool {
 	return atomic.LoadInt32(&inShutdown) != 0
+}
+
+func (is *InternalState) AddWsLimitExceedingIP(ip string) {
+	is.mux.Lock()
+	defer is.mux.Unlock()
+	is.WsLimitExceedingIPs[ip] = is.WsLimitExceedingIPs[ip] + 1
+}
+
+func (is *InternalState) ResetWsLimitExceedingIPs() {
+	is.mux.Lock()
+	defer is.mux.Unlock()
+	is.WsLimitExceedingIPs = make(map[string]int)
 }

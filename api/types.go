@@ -158,7 +158,7 @@ type MultiTokenValue struct {
 
 // Token contains info about tokens held by an address
 type Token struct {
-	Type             bchain.TokenTypeName `json:"type"`
+	Type             bchain.TokenTypeName `json:"type" ts_type:"'XPUBAddress' | 'ERC20' | 'ERC721' | 'ERC1155'"`
 	Name             string               `json:"name"`
 	Path             string               `json:"path,omitempty"`
 	Contract         string               `json:"contract,omitempty"`
@@ -208,9 +208,9 @@ type TokenTransfer struct {
 	From             string               `json:"from"`
 	To               string               `json:"to"`
 	Contract         string               `json:"contract"`
-	Name             string               `json:"name"`
-	Symbol           string               `json:"symbol"`
-	Decimals         int                  `json:"decimals"`
+	Name             string               `json:"name,omitempty"`
+	Symbol           string               `json:"symbol,omitempty"`
+	Decimals         int                  `json:"decimals,omitempty"`
 	Value            *Amount              `json:"value,omitempty"`
 	MultiTokenValues []MultiTokenValue    `json:"multiTokenValues,omitempty"`
 }
@@ -230,8 +230,12 @@ type EthereumSpecific struct {
 	Error             string                                 `json:"error,omitempty"`
 	Nonce             uint64                                 `json:"nonce"`
 	GasLimit          *big.Int                               `json:"gasLimit"`
-	GasUsed           *big.Int                               `json:"gasUsed"`
-	GasPrice          *Amount                                `json:"gasPrice"`
+	GasUsed           *big.Int                               `json:"gasUsed,omitempty"`
+	GasPrice          *Amount                                `json:"gasPrice,omitempty"`
+	L1Fee             *big.Int                               `json:"l1Fee,omitempty"`
+	L1FeeScalar       string                                 `json:"l1FeeScalar,omitempty"`
+	L1GasPrice        *Amount                                `json:"l1GasPrice,omitempty"`
+	L1GasUsed         *big.Int                               `json:"l1GasUsed,omitempty"`
 	Data              string                                 `json:"data,omitempty"`
 	ParsedData        *bchain.EthereumParsedInputData        `json:"parsedData,omitempty"`
 	InternalTransfers []EthereumInternalTransfer             `json:"internalTransfers,omitempty"`
@@ -263,7 +267,7 @@ type Tx struct {
 	FeesSat                *Amount           `json:"fees,omitempty"`
 	Hex                    string            `json:"hex,omitempty"`
 	Rbf                    bool              `json:"rbf,omitempty"`
-	CoinSpecificData       json.RawMessage   `json:"coinSpecificData,omitempty"`
+	CoinSpecificData       json.RawMessage   `json:"coinSpecificData,omitempty" ts_type:"any"`
 	TokenTransfers         []TokenTransfer   `json:"tokenTransfers,omitempty"`
 	EthereumSpecific       *EthereumSpecific `json:"ethereumSpecific,omitempty"`
 	AddressAliases         AddressAliasesMap `json:"addressAliases,omitempty"`
@@ -316,6 +320,19 @@ type AddressFilter struct {
 	OnlyConfirmed bool
 }
 
+// StakingPool holds data about address participation in a staking pool contract
+type StakingPool struct {
+	Contract                string  `json:"contract"`
+	Name                    string  `json:"name"`
+	PendingBalance          *Amount `json:"pendingBalance"`
+	PendingDepositedBalance *Amount `json:"pendingDepositedBalance"`
+	DepositedBalance        *Amount `json:"depositedBalance"`
+	WithdrawTotalAmount     *Amount `json:"withdrawTotalAmount"`
+	ClaimableAmount         *Amount `json:"claimableAmount"`
+	RestakedReward          *Amount `json:"restakedReward"`
+	AutocompoundBalance     *Amount `json:"autocompoundBalance"`
+}
+
 // Address holds information about address and its transactions
 type Address struct {
 	Paging
@@ -326,6 +343,7 @@ type Address struct {
 	UnconfirmedBalanceSat *Amount              `json:"unconfirmedBalance"`
 	UnconfirmedTxs        int                  `json:"unconfirmedTxs"`
 	Txs                   int                  `json:"txs"`
+	AddrTxCount           int                  `json:"addrTxCount,omitempty"`
 	NonTokenTxs           int                  `json:"nonTokenTxs,omitempty"`
 	InternalTxs           int                  `json:"internalTxs,omitempty"`
 	Transactions          []*Tx                `json:"transactions,omitempty"`
@@ -341,6 +359,7 @@ type Address struct {
 	ContractInfo          *bchain.ContractInfo `json:"contractInfo,omitempty"`
 	Erc20Contract         *bchain.ContractInfo `json:"erc20Contract,omitempty"` // deprecated
 	AddressAliases        AddressAliasesMap    `json:"addressAliases,omitempty"`
+	StakingPools          []StakingPool        `json:"stakingPools,omitempty"`
 	// helpers for explorer
 	Filter        string              `json:"-"`
 	XPubAddresses map[string]struct{} `json:"-"`
@@ -484,6 +503,7 @@ type BlockRaw struct {
 // BlockbookInfo contains information about the running blockbook instance
 type BlockbookInfo struct {
 	Coin                         string                       `json:"coin"`
+	Network                      string                       `json:"network"`
 	Host                         string                       `json:"host"`
 	Version                      string                       `json:"version"`
 	GitCommit                    string                       `json:"gitCommit"`
@@ -503,6 +523,7 @@ type BlockbookInfo struct {
 	CurrentFiatRatesTime         *time.Time                   `json:"currentFiatRatesTime,omitempty"`
 	HistoricalFiatRatesTime      *time.Time                   `json:"historicalFiatRatesTime,omitempty"`
 	HistoricalTokenFiatRatesTime *time.Time                   `json:"historicalTokenFiatRatesTime,omitempty"`
+	SupportedStakingPools        []string                     `json:"supportedStakingPools,omitempty"`
 	DbSizeFromColumns            int64                        `json:"dbSizeFromColumns,omitempty"`
 	DbColumns                    []common.InternalStateColumn `json:"dbColumns,omitempty"`
 	About                        string                       `json:"about"`
