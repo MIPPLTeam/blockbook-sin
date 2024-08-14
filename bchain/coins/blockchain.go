@@ -14,6 +14,7 @@ import (
 	"github.com/trezor/blockbook/bchain/coins/avalanche"
 	"github.com/trezor/blockbook/bchain/coins/bch"
 	"github.com/trezor/blockbook/bchain/coins/bellcoin"
+	"github.com/trezor/blockbook/bchain/coins/biblepay"
 	"github.com/trezor/blockbook/bchain/coins/bitcore"
 	"github.com/trezor/blockbook/bchain/coins/bitzeny"
 	"github.com/trezor/blockbook/bchain/coins/bsc"
