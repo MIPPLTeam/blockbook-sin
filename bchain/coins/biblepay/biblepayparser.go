@@ -19,6 +19,7 @@ const (
 var (
 	MainNetParams chaincfg.Params
 	TestNetParams chaincfg.Params
+	RegtestParams chaincfg.Params
 )
 
 func init() {
